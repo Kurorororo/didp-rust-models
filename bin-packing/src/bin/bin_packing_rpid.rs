@@ -129,7 +129,7 @@ impl Bound for BinPacking {
             .collect::<Vec<_>>();
 
         let weight_sum = weights.iter().sum::<i32>() - state.remaining;
-        let lb1 = weight_sum / capacity + if weight_sum % capacity == 0 { 0 } else { 1 };
+        let lb1 = weight_sum / capacity + if weight_sum % capacity > 0 { 1 } else { 0 };
 
         let mut lb2 = algorithms::compute_bin_packing_lb2(capacity, weights.iter().copied()) as i32;
 
