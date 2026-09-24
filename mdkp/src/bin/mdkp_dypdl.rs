@@ -1,12 +1,12 @@
 use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
-    create_caasdy, create_dual_bound_cabs, BeamSearchParameters, CabsParameters, FEvaluatorType,
-    Parameters,
+    BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use mdkp::{Args, Instance, SolverChoice};
 use rpid::timer::Timer;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -21,11 +21,23 @@ fn main() {
 
     let instance = Instance::read_from_file(&args.input_file).unwrap();
 
+    assert!(
+        args.epsilon.is_finite() && args.epsilon >= 0.0,
+        "epsilon must be finite and nonnegative"
+    );
+    assert!(
+        instance
+            .capacities
+            .iter()
+            .chain(instance.weights.iter().flatten())
+            .all(|&w| w >= 0),
+        "capacities and weights must be nonnegative"
+    );
     let mut model = Model::default();
     model.set_maximize();
 
     let n = instance.profits.len();
-    let item = model.add_object_type("item", n).unwrap();
+    let item = model.add_object_type("item", n + 1).unwrap();
 
     let current = model.add_element_variable("current", item, 0).unwrap();
     let remaining = instance
@@ -34,13 +46,16 @@ fn main() {
         .enumerate()
         .map(|(i, &c)| {
             model
-                .add_integer_variable(format!("remaining {i}"), c)
+                .add_integer_resource_variable(format!("remaining {i}"), false, c)
                 .unwrap()
         })
         .collect::<Vec<_>>();
 
     let profits = model
-        .add_table_1d("profits", instance.profits.clone())
+        .add_table_1d(
+            "profits",
+            instance.profits.iter().copied().chain([0]).collect(),
+        )
         .unwrap();
     let weights = instance
         .weights
@@ -48,12 +63,16 @@ fn main() {
         .enumerate()
         .map(|(i, ws)| {
             model
-                .add_table_1d(format!("weights {i}"), ws.clone())
+                .add_table_1d(
+                    format!("weights {i}"),
+                    ws.iter().copied().chain([0]).collect(),
+                )
                 .unwrap()
         })
         .collect::<Vec<_>>();
 
     let mut pack = Transition::new("pack");
+    pack.add_precondition(Condition::comparison_e(ComparisonOperator::Lt, current, n));
     pack.set_cost(profits.element(current) + IntegerExpression::Cost);
     pack.add_effect(current, current + 1).unwrap();
 
@@ -69,6 +88,7 @@ fn main() {
     model.add_forward_transition(pack).unwrap();
 
     let mut ignore = Transition::new("ignore");
+    ignore.add_precondition(Condition::comparison_e(ComparisonOperator::Lt, current, n));
     ignore.set_cost(IntegerExpression::Cost);
     ignore.add_effect(current, current + 1).unwrap();
     model.add_forward_transition(ignore).unwrap();
@@ -81,62 +101,45 @@ fn main() {
         )])
         .unwrap();
 
-    let mut total_profit_after = instance
-        .profits
-        .iter()
-        .rev()
-        .scan(0, |acc, &x| {
-            *acc += x;
-
-            Some(*acc)
-        })
-        .collect::<Vec<_>>();
-    total_profit_after.reverse();
-    total_profit_after.push(0);
-
-    instance
-        .weights
-        .iter()
-        .zip(remaining)
-        .enumerate()
-        .for_each(|(j, (ws, r))| {
-            let mut ms = instance
+    let rewards = model
+        .add_table_1d(
+            "rewards",
+            instance
                 .profits
                 .iter()
-                .zip(ws)
-                .enumerate()
-                .map(|(i, (&p, &w))| {
-                    if w > 0 {
-                        p as f64 / w as f64 + args.epsilon
-                    } else {
-                        total_profit_after[i] as f64
-                    }
-                })
-                .rev()
-                .scan(0.0, |acc, x| {
-                    if *acc < x {
-                        *acc = x;
-                    }
-
-                    Some(*acc)
-                })
-                .collect::<Vec<_>>();
-            ms.reverse();
-            ms.push(0.0);
-            let ms = model.add_table_1d(format!("ms {j}"), ms).unwrap();
-            model
-                .add_dual_bound(IntegerExpression::floor(r.max(1) * ms.element(current)))
-                .unwrap();
-        });
-
-    let total_profit_after = model
-        .add_table_1d("total_profit_after", total_profit_after)
+                .map(|&p| std::cmp::max(p, 0))
+                .chain([0])
+                .collect(),
+        )
+        .unwrap();
+    let suffix = (0..=n)
+        .map(|i| model.create_set(item, &(i..n).collect::<Vec<_>>()).unwrap())
+        .collect();
+    let suffix = model.add_table_1d("suffix", suffix).unwrap();
+    let remaining_items = model
+        .add_set_state_function("remaining items", suffix.element(current))
         .unwrap();
     model
-        .add_dual_bound(total_profit_after.element(current))
+        .add_dual_bound(rewards.sum(remaining_items.clone()))
         .unwrap();
-
-    let model = Rc::new(model);
+    let x = model.add_local_variable("x").unwrap();
+    for (w, r) in weights.iter().zip(remaining) {
+        let free = remaining_items.clone().filter(
+            x,
+            Condition::comparison_i(ComparisonOperator::Eq, w.element(x), 0),
+        );
+        let positive = remaining_items.clone().filter(
+            x,
+            Condition::comparison_i(ComparisonOperator::Gt, w.element(x), 0),
+        );
+        let bound =
+            ContinuousExpression::fractional_knapsack_with_integer_tables(positive, r, rewards, *w);
+        model
+            .add_dual_bound(IntegerExpression::floor(
+                rewards.sum(free) + bound + args.epsilon,
+            ))
+            .unwrap();
+    }
 
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
@@ -155,11 +158,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };

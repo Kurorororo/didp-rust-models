@@ -3,7 +3,7 @@ use fixedbitset::FixedBitSet;
 use m_pdtsp::{Args, RoundedInstance, SolverChoice};
 use rpid::prelude::*;
 use rpid::{algorithms, io, solvers, timer::Timer};
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
 use tsplib_parser::Instance;
 
 #[cfg(not(target_env = "msvc"))]
@@ -13,37 +13,47 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[derive(Clone)]
 struct OnePdtsp {
     capacity: i32,
     demands: Vec<i32>,
     predecessors: Vec<FixedBitSet>,
     distances: Vec<Vec<Option<i32>>>,
-    min_to: Vec<i32>,
-    min_from: Vec<i32>,
+    sorted_edges: Vec<(usize, usize, i32)>,
+    node_to_sorted_out_edges: Vec<Vec<(usize, i32)>>,
+    sorted_edges_to_goal: Vec<(usize, i32)>,
 }
 
 impl From<RoundedInstance> for OnePdtsp {
     fn from(instance: RoundedInstance) -> Self {
         let (predecessors, distances) = instance.extract_predecessors_and_filtered_distances();
         let demands = instance.demands.iter().map(|d| d.iter().sum()).collect();
-        let min_to = algorithms::take_column_wise_min_with_option(&distances)
-            .map(|x| x.unwrap_or(0))
-            .collect();
-        let min_from = algorithms::take_row_wise_min_with_option(&distances)
-            .map(|x| x.unwrap_or(0))
-            .collect();
+        let sorted_edges = algorithms::sort_weight_matrix_with_option(&distances);
+        let n = instance.nodes.len();
+        let mut node_to_sorted_out_edges = vec![Vec::new(); n];
+        let mut sorted_edges_to_goal = Vec::new();
+
+        for &(i, j, w) in &sorted_edges {
+            node_to_sorted_out_edges[i].push((j, w));
+
+            if j == n - 1 {
+                sorted_edges_to_goal.push((i, w));
+            }
+        }
 
         Self {
             capacity: instance.capacity,
             demands,
             predecessors,
             distances,
-            min_to,
-            min_from,
+            sorted_edges,
+            node_to_sorted_out_edges,
+            sorted_edges_to_goal,
         }
     }
 }
 
+#[derive(Clone)]
 struct OnePdtspState {
     unvisited: FixedBitSet,
     current: usize,
@@ -121,17 +131,39 @@ impl Bound for OnePdtsp {
     type CostType = i32;
 
     fn get_dual_bound(&self, state: &Self::State) -> Option<Self::CostType> {
+        let n = state.unvisited.count_ones(..);
         let goal = self.demands.len() - 1;
-        let to_bound =
-            state.unvisited.ones().map(|i| self.min_to[i]).sum::<i32>() + self.min_to[goal];
-        let from_bound = state
-            .unvisited
-            .ones()
-            .map(|i| self.min_from[i])
-            .sum::<i32>()
-            + self.min_from[state.current];
 
-        Some(cmp::max(to_bound, from_bound))
+        if n == 0 {
+            return self.distances[state.current][goal];
+        }
+
+        let minimum_start = self.node_to_sorted_out_edges[state.current]
+            .iter()
+            .find_map(|&(i, w)| {
+                if state.unvisited.contains(i) {
+                    Some(w)
+                } else {
+                    None
+                }
+            })?;
+
+        let iter = self
+            .sorted_edges
+            .iter()
+            .filter(|(i, j, _)| state.unvisited.contains(*i) && state.unvisited.contains(*j))
+            .copied();
+        let mst_weight = algorithms::compute_minimum_spanning_tree_weight(goal - 1, n, iter);
+
+        let minimum_return = self.sorted_edges_to_goal.iter().find_map(|&(i, w)| {
+            if state.unvisited.contains(i) {
+                Some(w)
+            } else {
+                None
+            }
+        })?;
+
+        Some(minimum_start + mst_weight + minimum_return)
     }
 }
 
@@ -153,7 +185,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(one_pdtsp, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    one_pdtsp,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(one_pdtsp, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

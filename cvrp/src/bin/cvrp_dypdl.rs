@@ -3,11 +3,11 @@ use cvrp::{Args, RoundedInstance, SolverChoice};
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use regex::Regex;
-use rpid::{algorithms, timer::Timer};
-use std::rc::Rc;
+use rpid::timer::Timer;
+use std::{rc::Rc, sync::Arc};
 use tsplib_parser::Instance;
 
 #[cfg(not(target_env = "msvc"))]
@@ -62,6 +62,17 @@ fn main() {
         .collect();
     let distances = model.add_table_2d("distances", distances).unwrap();
 
+    let connected = model
+        .add_table_2d(
+            "connected",
+            instance
+                .distances
+                .iter()
+                .map(|row| row.iter().map(|d| d.is_some()).collect())
+                .collect(),
+        )
+        .unwrap();
+
     for next in (0..n).filter(|&i| i != depot) {
         let mut visit = Transition::new(format!("{next}"));
         visit.set_cost(distances.element(current, next) + IntegerExpression::Cost);
@@ -73,6 +84,7 @@ fn main() {
             .unwrap();
 
         visit.add_precondition(unvisited.contains(next));
+        visit.add_precondition(connected.element(current, next));
         visit.add_precondition(Condition::comparison_i(
             ComparisonOperator::Le,
             load + instance.demands[next],
@@ -119,6 +131,13 @@ fn main() {
         visit_via_depot.add_effect(k, k + 1).unwrap();
 
         visit_via_depot.add_precondition(unvisited.contains(next));
+        visit_via_depot.add_precondition(connected.element(current, depot));
+        visit_via_depot.add_precondition(connected.element(depot, next));
+        visit_via_depot.add_precondition(Condition::comparison_i(
+            ComparisonOperator::Le,
+            instance.demands[next],
+            instance.capacity,
+        ));
         visit_via_depot.add_precondition(Condition::comparison_e(
             ComparisonOperator::Ne,
             current,
@@ -135,7 +154,11 @@ fn main() {
 
     model
         .add_base_case_with_cost(
-            vec![unvisited.is_empty()],
+            vec![
+                unvisited.is_empty(),
+                connected.element(current, depot)
+                    | Condition::comparison_e(ComparisonOperator::Eq, current, depot),
+            ],
             distances.element(current, depot),
         )
         .unwrap();
@@ -153,23 +176,51 @@ fn main() {
         ))
         .unwrap();
 
-    let min_to = algorithms::take_column_wise_min_with_option(&instance.distances)
-        .map(|x| x.unwrap())
-        .collect::<Vec<_>>();
-    let min_to = model.add_table_1d("min_to", min_to).unwrap();
+    // A compressed edge may go via the depot, even when rounding makes it
+    // cheaper than the direct edge. Missing edges receive a finite penalty.
+    let infinity = (n as i32 + n_vehicles)
+        * instance
+            .distances
+            .iter()
+            .flatten()
+            .filter_map(|&d| d)
+            .max()
+            .unwrap_or(0)
+        + 1;
+    let mst_distances = instance
+        .distances
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            (0..n)
+                .map(|j| {
+                    if i == j {
+                        return 0;
+                    }
+                    let via = row[depot]
+                        .zip(instance.distances[depot][j])
+                        .map(|(a, b)| a + b);
+                    row[j].into_iter().chain(via).min().unwrap_or(infinity)
+                })
+                .collect()
+        })
+        .collect();
+    let mst_distances = model.add_table_2d("mst distances", mst_distances).unwrap();
+    let min_return = instance
+        .distances
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != depot)
+        .filter_map(|(_, row)| row[depot])
+        .min()
+        .unwrap_or(0);
     model
-        .add_dual_bound(min_to.sum(unvisited) + min_to.element(depot))
+        .add_dual_bound(IfThenElse::<IntegerExpression>::if_then_else(
+            unvisited.is_empty(),
+            distances.element(current, depot),
+            mst_distances.minimum_spanning_tree(unvisited.add(current)) + min_return,
+        ))
         .unwrap();
-
-    let min_from = algorithms::take_row_wise_min_with_option(&instance.distances)
-        .map(|x| x.unwrap())
-        .collect::<Vec<_>>();
-    let min_from = model.add_table_1d("min_from", min_from).unwrap();
-    model
-        .add_dual_bound(min_from.sum(unvisited) + min_from.element(current))
-        .unwrap();
-
-    let model = Rc::new(model);
 
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
@@ -188,11 +239,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };

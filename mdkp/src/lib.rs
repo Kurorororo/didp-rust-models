@@ -25,7 +25,11 @@ impl Instance {
             .parse::<usize>()?;
         digits.next();
         let profits = io::read_vector(&mut digits, n)?;
-        let weights = io::read_matrix(&mut digits, m, n)?;
+        let weights = if n == 0 {
+            vec![vec![]; m]
+        } else {
+            io::read_matrix(&mut digits, m, n)?
+        };
         let capacities = io::read_vector(&mut digits, m)?;
 
         Ok(Self {
@@ -71,6 +75,13 @@ pub enum SolverChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "Input file")]
     pub input_file: String,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]

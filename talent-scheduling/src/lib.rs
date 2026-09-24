@@ -127,7 +127,9 @@ impl Instance {
                     }
                 }
                 len if len > 1 => keep.push(i),
-                _ => {}
+                _ => {
+                    updated = true;
+                }
             }
         }
 
@@ -225,7 +227,7 @@ impl Instance {
 
             if let Some((new_instance, cost)) = instance.eliminate_single_scene_actors() {
                 instance = new_instance;
-                single_actor_cost = cost;
+                single_actor_cost += cost;
                 updated = true;
             }
 
@@ -262,6 +264,13 @@ pub enum SolverChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "Input file")]
     pub input_file: String,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]

@@ -1,8 +1,7 @@
 use clap::Parser;
 use mdkp::{Args, Instance, SolverChoice};
 use rpid::prelude::*;
-use rpid::{io, solvers, timer::Timer};
-use std::cmp;
+use rpid::{algorithms, io, solvers, timer::Timer};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -10,62 +9,25 @@ use tikv_jemallocator::Jemalloc;
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-
+#[derive(Clone)]
 struct Mdkp {
     instance: Instance,
-    total_profit_after: Vec<i32>,
-    max_efficiencies_after: Vec<Vec<f64>>,
+    sorted_items: Vec<Vec<(usize, i32, i32)>>,
+    epsilon: f64,
 }
 
 impl Mdkp {
     fn new(instance: Instance, epsilon: f64) -> Self {
-        let mut total_profit_after = instance
-            .profits
-            .iter()
-            .rev()
-            .scan(0, |acc, &x| {
-                *acc += x;
-
-                Some(*acc)
-            })
-            .collect::<Vec<_>>();
-        total_profit_after.reverse();
-
-        let max_efficiencies_after = instance
+        let sorted_items = instance
             .weights
             .iter()
-            .map(|ws| {
-                let mut ms = instance
-                    .profits
-                    .iter()
-                    .zip(ws)
-                    .enumerate()
-                    .map(|(i, (&p, &w))| {
-                        if w > 0 {
-                            p as f64 / w as f64 + epsilon
-                        } else {
-                            total_profit_after[i] as f64
-                        }
-                    })
-                    .rev()
-                    .scan(0.0, |acc, x| {
-                        if *acc < x {
-                            *acc = x;
-                        }
-
-                        Some(*acc)
-                    })
-                    .collect::<Vec<_>>();
-                ms.reverse();
-
-                ms
-            })
+            .map(|ws| algorithms::sort_knapsack_items_by_efficiency(ws, &instance.profits))
             .collect();
 
         Self {
             instance,
-            total_profit_after,
-            max_efficiencies_after,
+            sorted_items,
+            epsilon,
         }
     }
 }
@@ -162,17 +124,33 @@ impl Bound for Mdkp {
             return Some(0);
         }
 
-        let maximum_total_profit = self.total_profit_after[state.current];
-
-        let maximum_efficiency_bound = state
+        let bound = state
             .remaining
             .iter()
-            .zip(self.max_efficiencies_after.iter())
-            .map(|(&r, ms)| (cmp::max(r, 1) as f64 * ms[state.current]).floor() as i32)
+            .zip(self.sorted_items.iter())
+            .map(|(&r, items)| {
+                (algorithms::compute_fractional_knapsack_profit(
+                    r,
+                    items.iter().filter_map(|&(i, w, p)| {
+                        if i >= state.current && p > 0 {
+                            Some((w, p))
+                        } else {
+                            None
+                        }
+                    }),
+                ) + self.epsilon)
+                    .floor() as i32
+            })
+            .chain(std::iter::once(
+                self.instance.profits[state.current..]
+                    .iter()
+                    .map(|&p| p.max(0))
+                    .sum(),
+            ))
             .min()
             .unwrap();
 
-        Some(cmp::min(maximum_total_profit, maximum_efficiency_bound))
+        Some(bound)
     }
 }
 
@@ -192,7 +170,11 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(mdkp, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(mdkp, parameters, cabs_parameters, args.threads.get())
+            } else {
+                solvers::create_cabs(mdkp, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

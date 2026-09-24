@@ -3,10 +3,10 @@ use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use rpid::timer::Timer;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -36,16 +36,18 @@ fn main() {
         .add_element_resource_variable("bin_number", item, true, 0)
         .unwrap();
 
-    let mut no_available_item = Condition::Constant(true);
-
-    for (j, &wj) in instance.weights.iter().enumerate() {
-        let condition =
-            !unpacked.contains(j) | Condition::comparison_i(ComparisonOperator::Gt, wj, remaining);
-        no_available_item = no_available_item & condition;
-    }
-
+    let weights = model
+        .add_table_1d("weights", instance.weights.clone())
+        .unwrap();
+    let x = model.add_local_variable("x").unwrap();
     let no_available_item = model
-        .add_boolean_state_function("no available item", no_available_item)
+        .add_boolean_state_function(
+            "no available item",
+            unpacked.all(
+                x,
+                Condition::comparison_i(ComparisonOperator::Gt, weights.element(x), remaining),
+            ),
+        )
         .unwrap();
 
     for (i, &wi) in instance.weights.iter().enumerate() {
@@ -95,9 +97,6 @@ fn main() {
 
     model.add_base_case(vec![unpacked.is_empty()]).unwrap();
 
-    let weights = model
-        .add_table_1d("weights", instance.weights.clone())
-        .unwrap();
     model
         .add_dual_bound(IntegerExpression::ceil(
             ContinuousExpression::from(weights.sum(unpacked) - remaining)
@@ -133,11 +132,11 @@ fn main() {
             if 3 * x > 2 * instance.capacity {
                 1.0
             } else if 3 * x == 2 * instance.capacity {
-                0.6666
+                0.666
             } else if 3 * x > instance.capacity {
                 0.5
             } else if 3 * x == instance.capacity {
-                0.3333
+                0.333
             } else {
                 0.0
             }
@@ -152,8 +151,6 @@ fn main() {
                 - IfThenElse::<IntegerExpression>::if_then_else(remaining_ge_one_third, 1, 0),
         )
         .unwrap();
-
-    let model = Rc::new(model);
 
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
@@ -172,11 +169,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };

@@ -12,8 +12,10 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[derive(Clone)]
 struct BinPacking(Instance);
 
+#[derive(Clone)]
 struct BinPackingState {
     remaining: i32,
     unpacked: FixedBitSet,
@@ -163,7 +165,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(bin_packing, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    bin_packing,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(bin_packing, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

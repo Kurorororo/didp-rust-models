@@ -5,6 +5,7 @@ use rpid::{algorithms, io, solvers, timer::Timer};
 use std::cmp::{self, Ordering};
 use tsptw::{Args, Instance, SimplificationChoice, SolverChoice};
 
+#[derive(Clone)]
 struct Tsptw {
     instance: Instance,
     c_star: Vec<Vec<Option<i32>>>,
@@ -45,6 +46,7 @@ impl Tsptw {
     }
 }
 
+#[derive(Clone)]
 struct TsptwState {
     unvisited: FixedBitSet,
     current: usize,
@@ -75,7 +77,7 @@ impl Dp for Tsptw {
         TsptwState {
             unvisited,
             current: 0,
-            time: 0,
+            time: self.instance.a[0].max(0),
         }
     }
 
@@ -120,6 +122,15 @@ impl Dp for Tsptw {
     fn get_base_cost(&self, state: &Self::State) -> Option<Self::CostType> {
         if state.unvisited.is_clear() {
             self.instance.c[state.current][0]
+                .filter(|&distance| state.time + distance <= self.instance.b[0])
+                .map(|distance| {
+                    distance
+                        + if self.minimize_makespan {
+                            self.instance.a[0].max(0)
+                        } else {
+                            0
+                        }
+                })
         } else {
             None
         }
@@ -211,7 +222,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(tsptw, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    tsptw,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(tsptw, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

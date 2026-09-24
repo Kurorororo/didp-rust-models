@@ -5,6 +5,7 @@ use rpid::prelude::*;
 use rpid::{io, solvers, timer::Timer};
 use std::iter;
 
+#[derive(Clone)]
 struct GolomobRuler {
     n: usize,
     lower_bounds: Vec<i32>,
@@ -24,6 +25,7 @@ impl GolomobRuler {
     }
 }
 
+#[derive(Clone)]
 struct GolomobRulerState {
     mark_set: FixedBitSet,
     distance_set: FixedBitSet,
@@ -130,7 +132,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(golomob_ruler, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    golomob_ruler,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(golomob_ruler, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

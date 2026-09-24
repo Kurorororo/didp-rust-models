@@ -1,3 +1,6 @@
+pub mod dypdl_model;
+pub mod rpid_model;
+
 use clap::{Parser, ValueEnum};
 use rpid::algorithms;
 use std::cmp;
@@ -107,7 +110,7 @@ impl RoundedInstance {
             .zip(instance.service_time)
             .map(|(row, s)| {
                 row.into_iter()
-                    .map(|d| ((s + d) * pow).trunc() as i32)
+                    .map(|d| (s * pow).trunc() as i32 + (d * pow).trunc() as i32)
                     .collect()
             })
             .collect();
@@ -136,12 +139,15 @@ impl RoundedInstance {
         let n = self.vertices.len();
         let mut visited = vec![false; n];
         let mut current = 0;
-        let mut time = 0;
+        let mut time = self.opening[0].max(0);
+        if time > self.closing[0] {
+            return false;
+        }
         let mut recomputed_profit = 0;
 
         for &v in solution {
-            if v > n {
-                println!("customer {v} is not in the instance");
+            if v >= n || v == 0 || visited[v] {
+                println!("customer {v} is invalid or already visited");
 
                 return false;
             }
@@ -202,6 +208,13 @@ pub enum SolverChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "Input file")]
     pub input_file: String,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]

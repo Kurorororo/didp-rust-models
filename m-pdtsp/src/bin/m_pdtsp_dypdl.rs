@@ -2,11 +2,11 @@ use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use m_pdtsp::{Args, RoundedInstance, SolverChoice};
-use rpid::{algorithms, timer::Timer};
-use std::rc::Rc;
+use rpid::timer::Timer;
+use std::{rc::Rc, sync::Arc};
 use tsplib_parser::Instance;
 
 #[cfg(not(target_env = "msvc"))]
@@ -60,14 +60,31 @@ fn main() {
         .map(|row| row.iter().map(|&x| x.is_some()).collect())
         .collect();
     let connected = model.add_table_2d("connected", connected).unwrap();
-    let min_to = algorithms::take_column_wise_min_with_option(&distances)
-        .map(|x| x.unwrap_or(0))
+    // Connect impossible suffixes with a finite penalty above every feasible tour.
+    let infinity = n as i32
+        * distances
+            .iter()
+            .flatten()
+            .filter_map(|&d| d)
+            .max()
+            .unwrap_or(0)
+        + 1;
+    let min_goal = distances
+        .iter()
+        .filter_map(|row| row[goal])
+        .min()
+        .unwrap_or(infinity);
+    let mst_distances = distances
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            row.iter()
+                .enumerate()
+                .map(|(j, &d)| if i == j { 0 } else { d.unwrap_or(infinity) })
+                .collect()
+        })
         .collect();
-    let min_to = model.add_table_1d("min_to", min_to).unwrap();
-    let min_from = algorithms::take_row_wise_min_with_option(&distances)
-        .map(|x| x.unwrap_or(0))
-        .collect();
-    let min_from = model.add_table_1d("min_from", min_from).unwrap();
+    let mst_distances = model.add_table_2d("mst distances", mst_distances).unwrap();
     let distances = distances
         .iter()
         .map(|d| d.iter().map(|&x| x.unwrap_or(0)).collect())
@@ -103,15 +120,11 @@ fn main() {
         .unwrap();
 
     model
-        .add_dual_bound(min_to.sum(unvisited) + min_to.element(goal))
+        .add_dual_bound(mst_distances.minimum_spanning_tree(unvisited.add(current)) + min_goal)
         .unwrap();
-    model
-        .add_dual_bound(min_from.sum(unvisited) + min_from.element(current))
-        .unwrap();
-
-    let model = Rc::new(model);
 
     let parameters = Parameters::<i32> {
+        primal_bound: Some(infinity),
         time_limit: Some(args.time_limit),
         ..Default::default()
     };
@@ -128,11 +141,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };

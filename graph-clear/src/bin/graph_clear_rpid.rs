@@ -12,6 +12,7 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[derive(Clone)]
 struct GraphClear {
     instance: Instance,
     edge_weight_sum: Vec<i32>,
@@ -72,11 +73,7 @@ impl Dp for GraphClear {
     }
 
     fn get_base_cost(&self, clean: &Self::State) -> Option<Self::CostType> {
-        if clean.is_full() {
-            Some(0)
-        } else {
-            None
-        }
+        if clean.is_full() { Some(0) } else { None }
     }
 
     fn combine_cost_weights(&self, a: Self::CostType, b: Self::CostType) -> Self::CostType {
@@ -117,7 +114,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(graph_clear, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    graph_clear,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(graph_clear, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

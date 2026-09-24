@@ -2,11 +2,11 @@ use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use graph_clear::{Args, Instance, SolverChoice};
 use rpid::timer::Timer;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -44,6 +44,7 @@ fn main() {
         .add_set_state_function("contaminated", !clean)
         .unwrap();
 
+    let mut transition_ids = Vec::with_capacity(n);
     for (i, &wi) in instance.node_weights.iter().enumerate() {
         let mut sweep = Transition::new(format!("{i}"));
         sweep.set_cost(IntegerExpression::max(
@@ -53,7 +54,7 @@ fn main() {
         sweep.add_effect(clean, clean.add(i)).unwrap();
         sweep.add_precondition(contaminated.clone().contains(i));
 
-        model.add_forward_transition(sweep).unwrap();
+        transition_ids.push(model.add_forward_transition(sweep).unwrap());
     }
 
     model
@@ -66,7 +67,51 @@ fn main() {
 
     model.add_dual_bound(IntegerExpression::from(0)).unwrap();
 
-    let model = Rc::new(model);
+    let clean_edge_weights = (0..n)
+        .map(|i| {
+            model
+                .add_integer_state_function(
+                    format!("clean edge weights {i}"),
+                    edge_weights.sum_y(i, clean),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let contaminated_edge_weights = (0..n)
+        .map(|i| {
+            model
+                .add_integer_state_function(
+                    format!("contaminated edge weights {i}"),
+                    edge_weights.sum_y(i, contaminated.clone()),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            model
+                .add_transition_dominance_with_conditions(
+                    &transition_ids[i],
+                    &transition_ids[j],
+                    vec![
+                        Condition::comparison_i(
+                            ComparisonOperator::Le,
+                            instance.node_weights[i] + contaminated_edge_weights[i].clone(),
+                            instance.node_weights[j] + contaminated_edge_weights[j].clone(),
+                        ),
+                        Condition::comparison_i(
+                            ComparisonOperator::Le,
+                            contaminated_edge_weights[i].clone(),
+                            clean_edge_weights[i].clone(),
+                        ),
+                    ],
+                )
+                .unwrap();
+        }
+    }
 
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
@@ -85,11 +130,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Max)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Max,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Max)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Max)
         }
     };

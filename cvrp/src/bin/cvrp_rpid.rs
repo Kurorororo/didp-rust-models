@@ -14,32 +14,69 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[derive(Clone)]
 struct Cvrp {
     instance: RoundedInstance,
     n_vehicles: i32,
-    min_to: Vec<i32>,
-    min_from: Vec<i32>,
+    sorted_edges: Vec<(usize, usize, i32)>,
+    node_to_sorted_out_edges: Vec<Vec<(usize, i32)>>,
+    sorted_edges_to_depot: Vec<(usize, i32)>,
 }
 
 impl From<RoundedInstance> for Cvrp {
     fn from(instance: RoundedInstance) -> Self {
         let n_vehicles = instance.n_vehicles as i32;
-        let min_to = algorithms::take_column_wise_min_with_option(&instance.distances)
-            .map(|x| x.unwrap())
-            .collect();
-        let min_from = algorithms::take_row_wise_min_with_option(&instance.distances)
-            .map(|x| x.unwrap())
-            .collect();
+        let depot = instance.depot;
+        let weight_matrix = instance
+            .distances
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                row.iter()
+                    .enumerate()
+                    .map(|(j, &w)| {
+                        match (
+                            w,
+                            instance.distances[i][depot],
+                            instance.distances[depot][j],
+                        ) {
+                            (Some(w), Some(w_to_depot), Some(w_from_depot)) => {
+                                Some(cmp::min(w, w_to_depot + w_from_depot))
+                            }
+                            (Some(w), _, _) => Some(w),
+                            (_, Some(w_to_depot), Some(w_from_depot)) => {
+                                Some(w_to_depot + w_from_depot)
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect()
+            })
+            .collect::<Vec<_>>();
+        let sorted_edges = algorithms::sort_weight_matrix_with_option(&weight_matrix);
+        let n = instance.nodes.len();
+        let mut node_to_sorted_out_edges = vec![Vec::with_capacity(n); n];
+        let mut sorted_edges_to_depot = Vec::with_capacity(n);
+
+        for &(i, j, w) in &sorted_edges {
+            node_to_sorted_out_edges[i].push((j, w));
+
+            if j == depot {
+                sorted_edges_to_depot.push((i, w));
+            }
+        }
 
         Self {
             instance,
             n_vehicles,
-            min_to,
-            min_from,
+            sorted_edges,
+            node_to_sorted_out_edges,
+            sorted_edges_to_depot,
         }
     }
 }
 
+#[derive(Clone)]
 struct CvrpState {
     unvisited: FixedBitSet,
     current: usize,
@@ -180,16 +217,39 @@ impl Bound for Cvrp {
     type CostType = i32;
 
     fn get_dual_bound(&self, state: &Self::State) -> Option<Self::CostType> {
-        let bound_to = state.unvisited.ones().map(|i| self.min_to[i]).sum::<i32>()
-            + self.min_to[self.instance.depot];
-        let bound_from = state
-            .unvisited
-            .ones()
-            .map(|i| self.min_from[i])
-            .sum::<i32>()
-            + self.min_from[state.current];
+        let n = state.unvisited.count_ones(..);
 
-        Some(cmp::max(bound_to, bound_from))
+        if n == 0 {
+            return self.instance.distances[state.current][self.instance.depot];
+        }
+
+        let minimum_start = self.node_to_sorted_out_edges[state.current]
+            .iter()
+            .find_map(|&(i, w)| {
+                if state.unvisited.contains(i) {
+                    Some(w)
+                } else {
+                    None
+                }
+            })?;
+
+        let iter = self
+            .sorted_edges
+            .iter()
+            .filter(|(i, j, _)| (state.unvisited.contains(*i)) && state.unvisited.contains(*j))
+            .copied();
+        let mst_weight =
+            algorithms::compute_minimum_spanning_tree_weight(self.instance.demands.len(), n, iter);
+
+        let minimum_return = self.sorted_edges_to_depot.iter().find_map(|&(i, w)| {
+            if state.unvisited.contains(i) {
+                Some(w)
+            } else {
+                None
+            }
+        })?;
+
+        Some(minimum_start + mst_weight + minimum_return)
     }
 }
 
@@ -218,9 +278,13 @@ fn main() {
     };
     let solution = match args.solver {
         SolverChoice::Cabs => {
-            println!("Preparing time: {time}s", time = timer.get_elapsed_time());
             let cabs_parameters = CabsParameters::default();
-            let mut solver = solvers::create_cabs(cvrp, parameters, cabs_parameters);
+            println!("Preparing time: {time}s", time = timer.get_elapsed_time());
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(cvrp, parameters, cabs_parameters, args.threads.get())
+            } else {
+                solvers::create_cabs(cvrp, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

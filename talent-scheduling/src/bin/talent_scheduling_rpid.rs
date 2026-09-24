@@ -69,10 +69,6 @@ impl TalentScheduling {
             .flat_map(|&scene| self.scene_to_originals[scene].iter().cloned())
             .collect()
     }
-
-    fn reconstruct_cost(&self, cost: i32) -> i32 {
-        cost + self.single_actor_cost
-    }
 }
 
 impl Dp for TalentScheduling {
@@ -142,7 +138,11 @@ impl Dp for TalentScheduling {
     }
 
     fn get_base_cost(&self, remaining: &Self::State) -> Option<Self::CostType> {
-        if remaining.is_clear() { Some(0) } else { None }
+        if remaining.is_clear() {
+            Some(self.single_actor_cost)
+        } else {
+            None
+        }
     }
 }
 
@@ -160,7 +160,13 @@ impl Bound for TalentScheduling {
     type CostType = i32;
 
     fn get_dual_bound(&self, remaining: &Self::State) -> Option<Self::CostType> {
-        Some(remaining.ones().map(|i| self.scene_to_base_cost[i]).sum())
+        Some(
+            remaining
+                .ones()
+                .map(|i| self.scene_to_base_cost[i])
+                .sum::<i32>()
+                + self.single_actor_cost,
+        )
     }
 }
 
@@ -179,7 +185,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(ts.clone(), parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    ts.clone(),
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(ts.clone(), parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {
@@ -192,7 +207,6 @@ fn main() {
 
     if let Some(cost) = solution.cost {
         let scenes = ts.reconstruct_solution(&solution.transitions);
-        let cost = ts.reconstruct_cost(cost);
         let transitions = scenes
             .iter()
             .map(|t| format!("{t}"))

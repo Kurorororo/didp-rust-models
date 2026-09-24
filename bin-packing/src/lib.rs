@@ -100,6 +100,13 @@ pub enum SolverChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "Input file")]
     pub input_file: String,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]

@@ -20,7 +20,7 @@ pub fn validate(n: usize, marks: &[usize], length: usize) -> bool {
     let mut distance_set = FixedBitSet::with_capacity(n * n);
     let mut max_distance = 0;
 
-    for (&i, &j) in marks.iter().tuple_combinations() {
+    for [&i, &j] in marks.iter().array_combinations() {
         let distance = i.abs_diff(j);
 
         if distance_set.contains(distance) {
@@ -53,6 +53,13 @@ pub enum SolverChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "n")]
     pub n: usize,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]

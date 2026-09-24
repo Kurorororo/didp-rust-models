@@ -2,10 +2,10 @@ use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use rpid::timer::Timer;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 use wt::{Args, Instance, SolverChoice};
 
 #[cfg(not(target_env = "msvc"))]
@@ -70,8 +70,6 @@ fn main() {
 
     model.add_dual_bound(IntegerExpression::from(0)).unwrap();
 
-    let model = Rc::new(model);
-
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
         ..Default::default()
@@ -89,11 +87,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };

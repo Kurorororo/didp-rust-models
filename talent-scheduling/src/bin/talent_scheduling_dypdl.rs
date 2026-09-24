@@ -2,10 +2,10 @@ use clap::Parser;
 use dypdl::prelude::*;
 use dypdl_heuristic_search::{
     BeamSearchParameters, CabsParameters, FEvaluatorType, Parameters, create_caasdy,
-    create_dual_bound_cabs,
+    create_dual_bound_cabs, create_dual_bound_cahdbs2,
 };
 use rpid::timer::Timer;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 use talent_scheduling::{Args, Instance, SolverChoice};
 
 #[cfg(not(target_env = "msvc"))]
@@ -26,7 +26,7 @@ fn main() {
 
     let n = simplified_instance.scene_to_duration.len();
     let scene = model.add_object_type("scene", n).unwrap();
-    let m = simplified_instance.actor_to_cost.len();
+    let m = std::cmp::max(simplified_instance.actor_to_cost.len(), 1);
     let actor = model.add_object_type("actor", m).unwrap();
 
     let remaining = (0..n).collect::<Vec<_>>();
@@ -70,9 +70,9 @@ fn main() {
     let scene_to_actors = model
         .add_table_1d("scene to actors", scene_to_actors)
         .unwrap();
-    let actor_cost = model
-        .add_table_1d("actor cost", simplified_instance.actor_to_cost.clone())
-        .unwrap();
+    let mut actor_costs = simplified_instance.actor_to_cost.clone();
+    actor_costs.resize(m, 0);
+    let actor_cost = model.add_table_1d("actor cost", actor_costs).unwrap();
 
     let arrived = model
         .add_set_state_function("arrived", scene_to_actors.union(m, !remaining))
@@ -138,13 +138,16 @@ fn main() {
         }
     }
 
-    model.add_base_case(vec![remaining.is_empty()]).unwrap();
-
     model
-        .add_dual_bound(scene_to_base_cost.sum(remaining))
+        .add_base_case_with_cost(
+            vec![remaining.is_empty()],
+            IntegerExpression::from(single_actor_cost),
+        )
         .unwrap();
 
-    let model = Rc::new(model);
+    model
+        .add_dual_bound(scene_to_base_cost.sum(remaining) + single_actor_cost)
+        .unwrap();
 
     let parameters = Parameters::<i32> {
         time_limit: Some(args.time_limit),
@@ -163,11 +166,23 @@ fn main() {
             };
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
-            create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            if args.threads.get() > 1 {
+                let model = Arc::new(model);
+                create_dual_bound_cahdbs2(
+                    model,
+                    parameters,
+                    FEvaluatorType::Plus,
+                    args.threads.get(),
+                )
+            } else {
+                let model = Rc::new(model);
+                create_dual_bound_cabs(model, parameters, FEvaluatorType::Plus)
+            }
         }
         SolverChoice::Astar => {
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
 
+            let model = Rc::new(model);
             create_caasdy(model, parameters, FEvaluatorType::Plus)
         }
     };
@@ -191,7 +206,6 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        let cost = cost + single_actor_cost;
 
         if instance.validate(&schedule, cost) {
             println!("The solution is valid.");

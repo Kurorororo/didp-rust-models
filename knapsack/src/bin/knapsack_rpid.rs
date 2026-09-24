@@ -1,8 +1,8 @@
 use clap::Parser;
 use knapsack::{Args, Instance, SolverChoice};
 use rpid::prelude::*;
-use rpid::{io, solvers, timer::Timer};
-use std::cmp::{self, Ordering};
+use rpid::{algorithms, io, solvers, timer::Timer};
+use std::cmp::Ordering;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -11,46 +11,22 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+#[derive(Clone)]
 struct Knapsack {
     instance: Instance,
-    total_profit_after: Vec<i32>,
-    max_efficiency_after: Vec<f64>,
+    sorted_items: Vec<(usize, i32, i32)>,
+    epsilon: f64,
 }
 
 impl Knapsack {
     fn new(instance: Instance, epsilon: f64) -> Self {
-        let mut total_profit_after = instance
-            .profits
-            .iter()
-            .rev()
-            .scan(0, |acc, &x| {
-                *acc += x;
-
-                Some(*acc)
-            })
-            .collect::<Vec<_>>();
-        total_profit_after.reverse();
-
-        let mut max_efficiency_after = instance
-            .profits
-            .iter()
-            .zip(instance.weights.iter())
-            .map(|(&p, &w)| p as f64 / w as f64 + epsilon)
-            .rev()
-            .scan(0.0, |acc, x| {
-                if *acc < x {
-                    *acc = x;
-                }
-
-                Some(*acc)
-            })
-            .collect::<Vec<_>>();
-        max_efficiency_after.reverse();
+        let sorted_items =
+            algorithms::sort_knapsack_items_by_efficiency(&instance.weights, &instance.profits);
 
         Self {
             instance,
-            total_profit_after,
-            max_efficiency_after,
+            sorted_items,
+            epsilon,
         }
     }
 }
@@ -132,12 +108,21 @@ impl Bound for Knapsack {
             return Some(0);
         }
 
-        let maximum_total_profit = self.total_profit_after[state.current];
+        let sorted_weight_value_pairs = self.sorted_items.iter().filter_map(|&(i, w, p)| {
+            if i >= state.current && p > 0 {
+                Some((w, p))
+            } else {
+                None
+            }
+        });
 
-        let maximum_efficiency_bound =
-            (state.remaining as f64 * self.max_efficiency_after[state.current]).floor() as i32;
+        let bound = (algorithms::compute_fractional_knapsack_profit(
+            state.remaining,
+            sorted_weight_value_pairs,
+        ) + self.epsilon)
+            .floor();
 
-        Some(cmp::min(maximum_total_profit, maximum_efficiency_bound))
+        Some(bound as i32)
     }
 }
 
@@ -157,7 +142,16 @@ fn main() {
         SolverChoice::Cabs => {
             let cabs_parameters = CabsParameters::default();
             println!("Preparing time: {time}s", time = timer.get_elapsed_time());
-            let mut solver = solvers::create_cabs(knapsack, parameters, cabs_parameters);
+            let mut solver = if args.threads.get() > 1 {
+                solvers::create_parallel_cabs(
+                    knapsack,
+                    parameters,
+                    cabs_parameters,
+                    args.threads.get(),
+                )
+            } else {
+                solvers::create_cabs(knapsack, parameters, cabs_parameters)
+            };
             io::run_solver_and_dump_solution_history(&mut solver, &args.history).unwrap()
         }
         SolverChoice::Astar => {

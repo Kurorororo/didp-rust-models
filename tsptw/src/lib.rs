@@ -50,7 +50,7 @@ impl Instance {
             return false;
         }
 
-        let mut time = 0;
+        let mut time = self.a[0].max(0);
         let mut current = 0;
         let mut visited = vec![false; self.a.len()];
         let mut recomputed_cost = 0;
@@ -191,6 +191,15 @@ pub enum SimplificationChoice {
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(long, help = "Use the MST dual bound in the DyPDL model")]
+    pub mst: bool,
+    #[arg(
+        short = 'j',
+        long,
+        default_value = "1",
+        help = "Number of threads for CABS"
+    )]
+    pub threads: std::num::NonZeroUsize,
     #[arg(help = "Input file")]
     pub input_file: String,
     #[arg(short, long, value_enum, default_value_t = SolverChoice::Cabs, help = "Solver")]
